@@ -47,7 +47,10 @@ func (ls *lstore) Truncate(idx uint64) error {
 	return nil
 }
 
-func (ls *lstore) Replay(idx uint64, callback func([]byte) error) error {
+func (ls *lstore) Replay(idx uint64, callback func(b []byte)) error {
+	for _, lf := range ls.storeFiles {
+		lf.replay(idx, callback)
+	}
 	return nil
 }
 
@@ -157,6 +160,7 @@ func (lf *logFile) append(data []byte, idx uint64) {
 	entryOffset := lf.nextIdx * entrySize
 	buf := lf.data[entryOffset : entryOffset+entrySize]
 	setEntry(buf, idx, lf.dataOffset, uint64(len(data)))
+	assert(len(data) == copy(lf.data[lf.dataOffset:], data))
 
 	lf.nextIdx++
 	lf.dataOffset += uint64(len(data))
@@ -177,6 +181,20 @@ func (lf *logFile) nextIndex() uint64 {
 func (lf *logFile) getEntry(idx uint64) entry {
 	entryOffset := idx * entrySize
 	return entry(lf.data[entryOffset : entryOffset+entrySize])
+}
+
+func (lf *logFile) getData(idx uint64) []byte {
+	e := lf.getEntry(idx)
+	off := e.DataOffset()
+	sz := e.DataSize()
+	// fmt.Printf("idx: %d off: %d sz: %d\n", idx, off, sz)
+	return lf.data[off : off+sz]
+}
+
+func (lf *logFile) replay(idx uint64, f func(b []byte)) {
+	for i := idx; i < lf.nextIdx; i++ {
+		f(lf.getData(i))
+	}
 }
 
 func assert(condition bool) {

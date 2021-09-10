@@ -1,6 +1,7 @@
 package logstore
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -35,5 +36,22 @@ func TestOpen(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, len(ls.storeFiles))
 
-	ls.Append([]byte("hello"))
+}
+
+func TestAppendAndReplay(t *testing.T) {
+	ls, err := OpenLogStore(t.TempDir())
+	require.NoError(t, err)
+	require.Equal(t, 1, len(ls.storeFiles))
+
+	n := 5
+	for i := 0; i < n; i++ {
+		ls.Append([]byte(fmt.Sprintf("hello-%d", i)))
+	}
+
+	ind := 0
+	ls.Replay(0, func(buf []byte) {
+		require.Equal(t, []byte(fmt.Sprintf("hello-%d", ind)), buf)
+		ind++
+	})
+	require.Equal(t, n, ind)
 }
