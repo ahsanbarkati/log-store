@@ -73,6 +73,7 @@ func OpenLogStore(dir string) (*lstore, error) {
 
 	f, err := OpenLogFile(dir, 1)
 	ls.cur = f
+	ls.storeFiles = append(ls.storeFiles, f)
 	return ls, nil
 }
 
