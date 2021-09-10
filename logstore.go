@@ -32,11 +32,17 @@ type lstore struct {
 	dir     string
 }
 
-func (ls *lstore) Append(b []byte) uint64 {
+func (ls *lstore) Append(b []byte) (uint64, error) {
+	// create a new log file if the current log file is full.
+	if ls.cur.nextIdx >= maxEntries {
+		if err := ls.rotate(); err != nil {
+			return 0, errors.Wrap(err, "failed to append")
+		}
+	}
 	lf := ls.cur
 	lf.append(b, ls.nextIdx)
 	ls.nextIdx++
-	return ls.nextIdx - 1
+	return ls.nextIdx - 1, nil
 }
 
 func (ls *lstore) GetPosition() uint64 {
@@ -44,6 +50,22 @@ func (ls *lstore) GetPosition() uint64 {
 }
 
 func (ls *lstore) Truncate(idx uint64) error {
+	fid := sort.Search(len(ls.storeFiles), func(i int) bool {
+		lf := ls.storeFiles[i]
+		return lf.getEntry(0).Index() < idx
+	})
+	count := 0
+	for _, lf := range ls.storeFiles {
+		if lf.fid < fid {
+			count++
+			if err := lf.delete(); err != nil {
+				return err
+			}
+		} else {
+			break
+		}
+	}
+	ls.storeFiles = ls.storeFiles[count:]
 	return nil
 }
 
@@ -51,6 +73,16 @@ func (ls *lstore) Replay(idx uint64, callback func(b []byte)) error {
 	for _, lf := range ls.storeFiles {
 		lf.replay(idx, callback)
 	}
+	return nil
+}
+
+func (ls *lstore) rotate() error {
+	lf, err := OpenLogFile(ls.dir, len(ls.storeFiles))
+	if err != nil {
+		return errors.Wrap(err, "failed to rotate log file")
+	}
+	ls.storeFiles = append(ls.storeFiles, lf)
+	ls.cur = lf
 	return nil
 }
 
@@ -99,7 +131,7 @@ func OpenLogStore(dir string) (*lstore, error) {
 		return ls, nil
 	}
 
-	f, err := OpenLogFile(dir, 1)
+	f, err := OpenLogFile(dir, 0)
 	ls.cur = f
 	ls.storeFiles = append(ls.storeFiles, f)
 	return ls, nil
@@ -120,6 +152,7 @@ func setEntry(buf []byte, idx, dataOffset, dataSize uint64) {
 
 type logFile struct {
 	data []byte
+	fd   *os.File
 	fid  int
 
 	nextIdx    uint64
@@ -145,6 +178,7 @@ func OpenLogFile(path string, fid int) (*logFile, error) {
 	lf := &logFile{
 		data: buf,
 		fid:  fid,
+		fd:   fd,
 	}
 	lf.nextIdx = lf.nextIndex()
 	lf.dataOffset = dataStartOffset
@@ -195,6 +229,20 @@ func (lf *logFile) replay(idx uint64, f func(b []byte)) {
 	for i := idx; i < lf.nextIdx; i++ {
 		f(lf.getData(i))
 	}
+}
+
+func (lf *logFile) delete() error {
+	if err := syscall.Munmap(lf.data); err != nil {
+		return errors.Wrap(err, "delete failed to unmap")
+	}
+	lf.data = nil
+	if err := lf.fd.Truncate(0); err != nil {
+		return fmt.Errorf("failed to truncate file: %s, error: %v\n", lf.fd.Name(), err)
+	}
+	if err := lf.fd.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %s, error: %v\n", lf.fd.Name(), err)
+	}
+	return os.Remove(lf.fd.Name())
 }
 
 func assert(condition bool) {

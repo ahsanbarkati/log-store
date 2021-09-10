@@ -43,9 +43,11 @@ func TestAppendAndReplay(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, len(ls.storeFiles))
 
-	n := 5
+	n := int(100)
 	for i := 0; i < n; i++ {
-		ls.Append([]byte(fmt.Sprintf("hello-%d", i)))
+		idx, err := ls.Append([]byte(fmt.Sprintf("hello-%d", i)))
+		require.NoError(t, err)
+		require.Equal(t, uint64(i), idx)
 	}
 
 	ind := 0
