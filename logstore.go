@@ -15,15 +15,40 @@ import (
 )
 
 const (
-	LOG_SUFFIX = ".store"
+	logSuffix  = ".store"
+	entrySize  = 24
+	maxEntries = 10
+
+	logFileSize = 1 << 30
+
+	dataStartOffset = entrySize * maxEntries
 )
 
 type lstore struct {
 	storeFiles []*logFile
 	cur        *logFile
 
-	nextIdx int
+	nextIdx uint64
 	dir     string
+}
+
+func (ls *lstore) Append(b []byte) uint64 {
+	lf := ls.cur
+	lf.append(b, ls.nextIdx)
+	ls.nextIdx++
+	return ls.nextIdx - 1
+}
+
+func (ls *lstore) GetPosition() uint64 {
+	return ls.nextIdx
+}
+
+func (ls *lstore) Truncate(idx uint64) error {
+	return nil
+}
+
+func (ls *lstore) Replay(idx uint64, callback func([]byte) error) error {
+	return nil
 }
 
 func OpenLogStore(dir string) (*lstore, error) {
@@ -32,7 +57,7 @@ func OpenLogStore(dir string) (*lstore, error) {
 		if err != nil {
 			return err
 		}
-		if !fi.IsDir() && strings.HasSuffix(path, LOG_SUFFIX) {
+		if !fi.IsDir() && strings.HasSuffix(path, logSuffix) {
 			fileList = append(fileList, path)
 		}
 		return nil
@@ -44,7 +69,7 @@ func OpenLogStore(dir string) (*lstore, error) {
 	var files []*logFile
 	for _, path := range fileList {
 		_, fname := filepath.Split(path)
-		fname = strings.TrimSuffix(fname, LOG_SUFFIX)
+		fname = strings.TrimSuffix(fname, logSuffix)
 
 		fid, err := strconv.ParseInt(fname, 10, 64)
 		if err != nil {
@@ -77,56 +102,85 @@ func OpenLogStore(dir string) (*lstore, error) {
 	return ls, nil
 }
 
-func (ls *lstore) Append(b []byte) error {
-	return nil
-}
-
-func (ls *lstore) GetPosition() error {
-	return nil
-}
-
-func (ls *lstore) Truncate(idx uint64) error {
-	return nil
-}
-
-func (ls *lstore) Replay(idx uint64, callback func([]byte) error) error {
-	return nil
-}
-
 type entry []byte
 
 func (e entry) Index() uint64      { return binary.BigEndian.Uint64(e[:8]) }
-func (e entry) DataOffset() uint64 { return binary.BigEndian.Uint64(e[8:]) }
+func (e entry) DataOffset() uint64 { return binary.BigEndian.Uint64(e[8:16]) }
+func (e entry) DataSize() uint64   { return binary.BigEndian.Uint64(e[16:24]) }
 
-func createEntry(dataOffset, idx uint64) *entry {
-	return &entry{}
+func setEntry(buf []byte, idx, dataOffset, dataSize uint64) {
+	assert(len(buf) == entrySize)
+	binary.BigEndian.PutUint64(buf, idx)
+	binary.BigEndian.PutUint64(buf[8:], dataOffset)
+	binary.BigEndian.PutUint64(buf[16:], dataSize)
 }
 
 type logFile struct {
 	data []byte
-	fd   *os.File
 	fid  int
+
+	nextIdx    uint64
+	dataOffset uint64
 }
 
 func OpenLogFile(path string, fid int) (*logFile, error) {
-	filename := filepath.Join(path, fmt.Sprintf("%05d%s", fid, LOG_SUFFIX))
-
+	filename := filepath.Join(path, fmt.Sprintf("%05d%s", fid, logSuffix))
 	fd, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to open: %q", filename)
 	}
+	if err := fd.Truncate(int64(logFileSize)); err != nil {
+		return nil, errors.Wrapf(err, "failed to truncate file")
+	}
 
 	mtype := unix.PROT_READ | unix.PROT_WRITE
-	size := 1 << 20
-
-	buf, err := syscall.Mmap(int(fd.Fd()), 0, int(size), mtype, unix.MAP_SHARED)
+	buf, err := syscall.Mmap(int(fd.Fd()), 0, logFileSize, mtype, unix.MAP_SHARED)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to mmap the log file")
 	}
 
-	return &logFile{
+	lf := &logFile{
 		data: buf,
-		fd:   fd,
 		fid:  fid,
-	}, nil
+	}
+	lf.nextIdx = lf.nextIndex()
+	lf.dataOffset = dataStartOffset
+
+	if lf.nextIdx > 0 {
+		last := lf.getEntry(lf.nextIdx - 1)
+		lf.dataOffset = last.DataOffset() + last.DataSize()
+	}
+	return lf, nil
+}
+
+func (lf *logFile) append(data []byte, idx uint64) {
+	entryOffset := lf.nextIdx * entrySize
+	buf := lf.data[entryOffset : entryOffset+entrySize]
+	setEntry(buf, idx, lf.dataOffset, uint64(len(data)))
+
+	lf.nextIdx++
+	lf.dataOffset += uint64(len(data))
+}
+
+func (lf *logFile) firstIndex() uint64 {
+	return lf.getEntry(0).Index()
+}
+
+func (lf *logFile) nextIndex() uint64 {
+	idx := sort.Search(maxEntries, func(i int) bool {
+		e := lf.getEntry(uint64(i))
+		return e.Index() == 0
+	})
+	return uint64(idx)
+}
+
+func (lf *logFile) getEntry(idx uint64) entry {
+	entryOffset := idx * entrySize
+	return entry(lf.data[entryOffset : entryOffset+entrySize])
+}
+
+func assert(condition bool) {
+	if !condition {
+		panic("Assert failed")
+	}
 }
