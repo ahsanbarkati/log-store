@@ -2,6 +2,9 @@ package logstore
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -10,7 +13,7 @@ import (
 func TestLogFileOpen(t *testing.T) {
 	lf, err := OpenLogFile(t.TempDir(), 1)
 	require.NoError(t, err)
-
+	lf.init()
 	require.Equal(t, uint64(0), lf.nextIdx)
 	require.Equal(t, uint64(dataStartOffset), lf.dataOffset)
 }
@@ -18,6 +21,7 @@ func TestLogFileOpen(t *testing.T) {
 func TestLogFileAppend(t *testing.T) {
 	lf, err := OpenLogFile(t.TempDir(), 1)
 	require.NoError(t, err)
+	lf.init()
 
 	data := []byte("hello")
 	lf.append(data, 190)
@@ -56,4 +60,39 @@ func TestAppendAndReplay(t *testing.T) {
 		ind++
 	})
 	require.Equal(t, n, ind)
+}
+
+func TestConcurrentAppend(t *testing.T) {
+	ls, err := OpenLogStore(t.TempDir())
+	require.NoError(t, err)
+	require.Equal(t, 1, len(ls.storeFiles))
+
+	var wg sync.WaitGroup
+	numBlobs := 100
+	numGo := 16
+
+	for i := 0; i < numGo; i++ {
+		wg.Add(1)
+		go func(thread int, wg *sync.WaitGroup) {
+			defer wg.Done()
+			for i := 0; i < numBlobs; i++ {
+				_, err := ls.Append([]byte(fmt.Sprintf("hello-%d-%d", thread, i)))
+				require.NoError(t, err)
+			}
+
+		}(i, &wg)
+	}
+	wg.Wait()
+
+	mp := make(map[int]int)
+	ls.Replay(0, func(buf []byte) {
+		splits := strings.Split(string(buf), "-")
+		th, err := strconv.Atoi(splits[1])
+		require.NoError(t, err)
+		mp[th]++
+	})
+
+	for i := 0; i < numGo; i++ {
+		require.Equal(t, numBlobs, mp[i])
+	}
 }

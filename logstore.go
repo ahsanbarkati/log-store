@@ -8,7 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
+	"sync"
+	"sync/atomic"
 
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
@@ -25,6 +26,7 @@ const (
 )
 
 type lstore struct {
+	sync.RWMutex
 	storeFiles []*logFile
 	cur        *logFile
 
@@ -33,6 +35,9 @@ type lstore struct {
 }
 
 func (ls *lstore) Append(b []byte) (uint64, error) {
+	ls.Lock()
+	defer ls.Unlock()
+
 	// create a new log file if the current log file is full.
 	if ls.cur.nextIdx >= maxEntries {
 		if err := ls.rotate(); err != nil {
@@ -46,10 +51,13 @@ func (ls *lstore) Append(b []byte) (uint64, error) {
 }
 
 func (ls *lstore) GetPosition() uint64 {
-	return ls.nextIdx
+	return atomic.LoadUint64(&ls.nextIdx)
 }
 
 func (ls *lstore) Truncate(idx uint64) error {
+	ls.Lock()
+	defer ls.Unlock()
+
 	fid := sort.Search(len(ls.storeFiles), func(i int) bool {
 		lf := ls.storeFiles[i]
 		return lf.getEntry(0).Index() < idx
@@ -70,10 +78,28 @@ func (ls *lstore) Truncate(idx uint64) error {
 }
 
 func (ls *lstore) Replay(idx uint64, callback func(b []byte)) error {
+	ls.RLock()
+	defer ls.RUnlock()
+
 	for _, lf := range ls.storeFiles {
 		lf.replay(idx, callback)
 	}
 	return nil
+}
+
+func (ls *lstore) Sync() error {
+	assert(ls.cur != nil)
+	return unix.Msync(ls.cur.data, unix.MS_SYNC)
+}
+
+func (ls *lstore) Close() error {
+	if err := ls.Sync(); err != nil {
+		return err
+	}
+	if err := unix.Munmap(ls.cur.data); err != nil {
+		return err
+	}
+	return ls.cur.fd.Close()
 }
 
 func (ls *lstore) rotate() error {
@@ -81,6 +107,7 @@ func (ls *lstore) rotate() error {
 	if err != nil {
 		return errors.Wrap(err, "failed to rotate log file")
 	}
+	lf.init()
 	ls.storeFiles = append(ls.storeFiles, lf)
 	ls.cur = lf
 	return nil
@@ -131,9 +158,10 @@ func OpenLogStore(dir string) (*lstore, error) {
 		return ls, nil
 	}
 
-	f, err := OpenLogFile(dir, 0)
-	ls.cur = f
-	ls.storeFiles = append(ls.storeFiles, f)
+	lf, err := OpenLogFile(dir, 0)
+	lf.init()
+	ls.cur = lf
+	ls.storeFiles = append(ls.storeFiles, lf)
 	return ls, nil
 }
 
@@ -170,7 +198,7 @@ func OpenLogFile(path string, fid int) (*logFile, error) {
 	}
 
 	mtype := unix.PROT_READ | unix.PROT_WRITE
-	buf, err := syscall.Mmap(int(fd.Fd()), 0, logFileSize, mtype, unix.MAP_SHARED)
+	buf, err := unix.Mmap(int(fd.Fd()), 0, logFileSize, mtype, unix.MAP_SHARED)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to mmap the log file")
 	}
@@ -180,6 +208,10 @@ func OpenLogFile(path string, fid int) (*logFile, error) {
 		fid:  fid,
 		fd:   fd,
 	}
+	return lf, nil
+}
+
+func (lf *logFile) init() {
 	lf.nextIdx = lf.nextIndex()
 	lf.dataOffset = dataStartOffset
 
@@ -187,7 +219,6 @@ func OpenLogFile(path string, fid int) (*logFile, error) {
 		last := lf.getEntry(lf.nextIdx - 1)
 		lf.dataOffset = last.DataOffset() + last.DataSize()
 	}
-	return lf, nil
 }
 
 func (lf *logFile) append(data []byte, idx uint64) {
@@ -221,7 +252,6 @@ func (lf *logFile) getData(idx uint64) []byte {
 	e := lf.getEntry(idx)
 	off := e.DataOffset()
 	sz := e.DataSize()
-	// fmt.Printf("idx: %d off: %d sz: %d\n", idx, off, sz)
 	return lf.data[off : off+sz]
 }
 
@@ -232,15 +262,15 @@ func (lf *logFile) replay(idx uint64, f func(b []byte)) {
 }
 
 func (lf *logFile) delete() error {
-	if err := syscall.Munmap(lf.data); err != nil {
+	if err := unix.Munmap(lf.data); err != nil {
 		return errors.Wrap(err, "delete failed to unmap")
 	}
 	lf.data = nil
 	if err := lf.fd.Truncate(0); err != nil {
-		return fmt.Errorf("failed to truncate file: %s, error: %v\n", lf.fd.Name(), err)
+		return errors.Errorf("failed to truncate file: %s, error: %v\n", lf.fd.Name(), err)
 	}
 	if err := lf.fd.Close(); err != nil {
-		return fmt.Errorf("failed to close file: %s, error: %v\n", lf.fd.Name(), err)
+		return errors.Errorf("failed to close file: %s, error: %v\n", lf.fd.Name(), err)
 	}
 	return os.Remove(lf.fd.Name())
 }
