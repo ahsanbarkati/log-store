@@ -2,6 +2,8 @@ package logstore
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -10,10 +12,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func getBlob(i int) []byte { return []byte(fmt.Sprintf("hello-%d", i)) }
+
 func TestLogFileOpen(t *testing.T) {
 	lf, err := OpenLogFile(t.TempDir(), 1)
 	require.NoError(t, err)
 	lf.init()
+
 	require.Equal(t, uint64(0), lf.nextIdx)
 	require.Equal(t, uint64(dataStartOffset), lf.dataOffset)
 }
@@ -25,21 +30,16 @@ func TestLogFileAppend(t *testing.T) {
 
 	data := []byte("hello")
 	lf.append(data, 190)
-	e := lf.getEntry(0)
 
+	// Check that the entry is created as expected
+	e := lf.getEntry(0)
 	require.Equal(t, uint64(190), e.Index())
 	require.Equal(t, uint64(dataStartOffset), e.DataOffset())
 	require.Equal(t, uint64(len(data)), e.DataSize())
 
+	// Check that nextIdx and dataOffset is correctly set.
 	require.Equal(t, uint64(1), lf.nextIdx)
 	require.Equal(t, uint64(dataStartOffset+len(data)), lf.dataOffset)
-}
-
-func TestOpen(t *testing.T) {
-	ls, err := OpenLogStore(t.TempDir())
-	require.NoError(t, err)
-	require.Equal(t, 1, len(ls.storeFiles))
-
 }
 
 func TestAppendAndReplay(t *testing.T) {
@@ -49,17 +49,71 @@ func TestAppendAndReplay(t *testing.T) {
 
 	n := int(100)
 	for i := 0; i < n; i++ {
-		idx, err := ls.Append([]byte(fmt.Sprintf("hello-%d", i)))
+		idx, err := ls.Append(getBlob(i))
 		require.NoError(t, err)
 		require.Equal(t, uint64(i), idx)
 	}
 
 	ind := 0
 	ls.Replay(0, func(buf []byte) {
-		require.Equal(t, []byte(fmt.Sprintf("hello-%d", ind)), buf)
+		require.Equal(t, getBlob(ind), buf)
 		ind++
 	})
 	require.Equal(t, n, ind)
+}
+
+func TestRotate(t *testing.T) {
+	dir := t.TempDir()
+	ls, err := OpenLogStore(dir)
+	require.NoError(t, err)
+
+	// Adding entry more than maxEntries should rotate the log file.
+	for i := 0; i < maxEntries+1; i++ {
+		ls.Append(getBlob(i))
+	}
+	require.Equal(t, 2, len(ls.storeFiles))
+
+	// Walk the directory and verify that we have two log files.
+	var fileList []string
+	filepath.Walk(dir, func(path string, fi os.FileInfo, err error) error {
+		if !fi.IsDir() && strings.HasSuffix(path, logSuffix) {
+			_, fname := filepath.Split(path)
+			fileList = append(fileList, fname)
+		}
+		return nil
+	})
+	require.Equal(t, []string{"00000.store", "00001.store"}, fileList)
+}
+
+func TestTruncate(t *testing.T) {
+	dir := t.TempDir()
+	ls, err := OpenLogStore(dir)
+	require.NoError(t, err)
+
+	// Adding entry more than maxEntries should rotate the log file.
+	for i := 0; i < maxEntries+1; i++ {
+		ls.Append(getBlob(i))
+	}
+	require.Equal(t, 2, len(ls.storeFiles))
+	filepath.Walk(dir, func(path string, fi os.FileInfo, err error) error {
+		if !fi.IsDir() && strings.HasSuffix(path, logSuffix) {
+			// _, fname := filepath.Split(path)
+			// fileList = append(fileList, fname)
+			t.Log(path)
+		}
+		return nil
+	})
+
+	t.Log("Truncating")
+	ls.Truncate(maxEntries - 2)
+	filepath.Walk(dir, func(path string, fi os.FileInfo, err error) error {
+		if !fi.IsDir() && strings.HasSuffix(path, logSuffix) {
+			// _, fname := filepath.Split(path)
+			// fileList = append(fileList, fname)
+			t.Log(path)
+		}
+		return nil
+	})
 }
 
 func TestConcurrentAppend(t *testing.T) {
@@ -79,7 +133,6 @@ func TestConcurrentAppend(t *testing.T) {
 				_, err := ls.Append([]byte(fmt.Sprintf("hello-%d-%d", thread, i)))
 				require.NoError(t, err)
 			}
-
 		}(i, &wg)
 	}
 	wg.Wait()

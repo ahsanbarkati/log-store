@@ -60,7 +60,7 @@ func (ls *lstore) Truncate(idx uint64) error {
 
 	fid := sort.Search(len(ls.storeFiles), func(i int) bool {
 		lf := ls.storeFiles[i]
-		return lf.getEntry(0).Index() < idx
+		return lf.getEntry(0).Index() > idx
 	})
 	count := 0
 	for _, lf := range ls.storeFiles {
