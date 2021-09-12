@@ -18,7 +18,7 @@ import (
 const (
 	logSuffix  = ".store"
 	entrySize  = 24
-	maxEntries = 10
+	maxEntries = 1000
 
 	logFileSize = 1 << 30
 
