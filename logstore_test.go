@@ -17,16 +17,16 @@ func getBlob(i int) []byte { return []byte(fmt.Sprintf("hello-%d", i)) }
 func TestLogFileOpen(t *testing.T) {
 	lf, err := OpenLogFile(t.TempDir(), 1)
 	require.NoError(t, err)
-	lf.init()
+	lf.initLogFile()
 
 	require.Equal(t, uint64(0), lf.nextIdx)
-	require.Equal(t, uint64(dataStartOffset), lf.dataOffset)
+	require.Equal(t, uint64(dataStartOffset), lf.nextDataOffset)
 }
 
 func TestLogFileAppend(t *testing.T) {
 	lf, err := OpenLogFile(t.TempDir(), 1)
 	require.NoError(t, err)
-	lf.init()
+	lf.initLogFile()
 
 	data := []byte("hello")
 	lf.append(data, 190)
@@ -39,7 +39,7 @@ func TestLogFileAppend(t *testing.T) {
 
 	// Check that nextIdx and dataOffset is correctly set.
 	require.Equal(t, uint64(1), lf.nextIdx)
-	require.Equal(t, uint64(dataStartOffset+len(data)), lf.dataOffset)
+	require.Equal(t, uint64(dataStartOffset+len(data)), lf.nextDataOffset)
 }
 
 func TestAppendAndReplay(t *testing.T) {
@@ -90,27 +90,21 @@ func TestTruncate(t *testing.T) {
 	ls, err := OpenLogStore(dir)
 	require.NoError(t, err)
 
-	// Adding entry more than maxEntries should rotate the log file.
+	// Adding entry more than maxEntries should rotate the log file. After this there should be
+	// two files.
 	for i := 0; i < maxEntries+1; i++ {
 		ls.Append(getBlob(i))
 	}
 	require.Equal(t, 2, len(ls.storeFiles))
-	filepath.Walk(dir, func(path string, fi os.FileInfo, err error) error {
-		if !fi.IsDir() && strings.HasSuffix(path, logSuffix) {
-			// _, fname := filepath.Split(path)
-			// fileList = append(fileList, fname)
-			t.Log(path)
-		}
-		return nil
-	})
 
-	t.Log("Truncating")
-	ls.Truncate(maxEntries - 2)
+	// Truncating maxEntries-1 entries should delete the file 00000.store.
+	ls.Truncate(maxEntries - 1)
+	require.Equal(t, 1, len(ls.storeFiles))
+
 	filepath.Walk(dir, func(path string, fi os.FileInfo, err error) error {
 		if !fi.IsDir() && strings.HasSuffix(path, logSuffix) {
-			// _, fname := filepath.Split(path)
-			// fileList = append(fileList, fname)
-			t.Log(path)
+			_, fname := filepath.Split(path)
+			require.Equal(t, "00001.store", fname)
 		}
 		return nil
 	})

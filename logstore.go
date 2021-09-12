@@ -123,7 +123,7 @@ func (ls *lstore) rotate() error {
 	if err != nil {
 		return errors.Wrap(err, "failed to open new log file")
 	}
-	lf.init()
+	lf.initLogFile()
 	ls.storeFiles = append(ls.storeFiles, lf)
 	ls.cur = lf
 	return nil
@@ -149,16 +149,14 @@ func OpenLogStore(dir string) (*lstore, error) {
 	var files []*logFile
 	for _, path := range fileList {
 		_, fname := filepath.Split(path)
-		fname = strings.TrimSuffix(fname, logSuffix)
-
-		fid, err := strconv.ParseInt(fname, 10, 64)
+		fid, err := strconv.ParseInt(strings.TrimSuffix(fname, logSuffix), 10, 64)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to parse file name: %q", fname)
 		}
 
 		f, err := OpenLogFile(dir, int(fid))
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrapf(err, "failed to open log file: %q", fname)
 		}
 		files = append(files, f)
 	}
@@ -177,11 +175,20 @@ func OpenLogStore(dir string) (*lstore, error) {
 
 	// No store files were found, create one.
 	lf, err := OpenLogFile(dir, 0)
-	lf.init()
+	lf.initLogFile()
 	ls.cur = lf
 	ls.storeFiles = append(ls.storeFiles, lf)
 	return ls, nil
 }
+
+// Each entry is a 24 bytes metadata structured as below.
+// Index is the index number of the entry.
+// DataOffset is the index of the data corresponding to the entry.
+// DataSize is the number of bytes present in the data blob of the entry.
+//
+// +-----------------+----------------------+---------------------+
+// | Index (8 bytes) | DataOffset (8 bytes) | DataSize  (8 bytes) |
+// +-----------------+----------------------+---------------------+
 
 type entry []byte
 
@@ -196,69 +203,82 @@ func setEntry(buf []byte, idx, dataOffset, dataSize uint64) {
 	binary.BigEndian.PutUint64(buf[16:], dataSize)
 }
 
+// logFile is structured as shown below.
+// +---------+---------+-----+---------+--------+--------+-----+--------+
+// | Entry-0 | Entry-1 | ... | Entry-n | Data-0 | Data-1 | ... | Data-n |
+// +---------+---------+-----+---------+--------+--------+-----+--------+
+//
+// If containes the entries for each record, which serves as a metadata. Followed by the
+// corresponding data bytes. Both entries and the data are byte-serialized in a memory-mapped file.
+
 type logFile struct {
 	data []byte
 	fd   *os.File
 	fid  int
 
-	nextIdx    uint64
-	dataOffset uint64
+	nextIdx        uint64
+	nextDataOffset uint64
 }
 
-func OpenLogFile(path string, fid int) (*logFile, error) {
-	filename := filepath.Join(path, fmt.Sprintf("%05d%s", fid, logSuffix))
-	fd, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
+// OpenLogFile creates a new logFile at the given directory and with the given file-id.
+// The created file is also memory-mapped.
+func OpenLogFile(dir string, fid int) (*logFile, error) {
+	fname := filepath.Join(dir, fmt.Sprintf("%05d%s", fid, logSuffix))
+	fd, err := os.OpenFile(fname, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to open: %q", filename)
+		return nil, errors.Wrapf(err, "failed to open: %q", fname)
 	}
 	if err := fd.Truncate(int64(logFileSize)); err != nil {
-		return nil, errors.Wrapf(err, "failed to truncate file")
+		return nil, errors.Wrapf(err, "failed to truncate file: %q", fname)
 	}
 
-	mtype := unix.PROT_READ | unix.PROT_WRITE
-	buf, err := unix.Mmap(int(fd.Fd()), 0, logFileSize, mtype, unix.MAP_SHARED)
+	// Create a memory-mapped file with both read and write available.
+	buf, err := unix.Mmap(
+		int(fd.Fd()),
+		0,
+		logFileSize,
+		unix.PROT_READ|unix.PROT_WRITE,
+		unix.MAP_SHARED,
+	)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to mmap the log file")
+		return nil, errors.Wrapf(err, "failed to mmap file: %q", fname)
 	}
 
-	lf := &logFile{
+	return &logFile{
 		data: buf,
 		fid:  fid,
 		fd:   fd,
-	}
-	return lf, nil
+	}, nil
 }
 
-func (lf *logFile) init() {
-	lf.nextIdx = lf.nextIndex()
-	lf.dataOffset = dataStartOffset
+// initLogFile initializes the in-memory sturct of the log file by setting the nextIndex and
+// the nextDataOffset
+func (lf *logFile) initLogFile() {
+	lf.nextIdx = uint64(sort.Search(maxEntries, func(i int) bool {
+		e := lf.getEntry(uint64(i))
+		return e.Index() == 0
+	}))
+	lf.nextDataOffset = dataStartOffset
 
 	if lf.nextIdx > 0 {
 		last := lf.getEntry(lf.nextIdx - 1)
-		lf.dataOffset = last.DataOffset() + last.DataSize()
+		lf.nextDataOffset = last.DataOffset() + last.DataSize()
 	}
 }
 
+// append adds the given data byte to the log-file.
 func (lf *logFile) append(data []byte, idx uint64) {
 	entryOffset := lf.nextIdx * entrySize
 	buf := lf.data[entryOffset : entryOffset+entrySize]
-	setEntry(buf, idx, lf.dataOffset, uint64(len(data)))
-	assert(len(data) == copy(lf.data[lf.dataOffset:], data))
+	setEntry(buf, idx, lf.nextDataOffset, uint64(len(data)))
+	assert(len(data) == copy(lf.data[lf.nextDataOffset:], data))
 
 	lf.nextIdx++
-	lf.dataOffset += uint64(len(data))
+	lf.nextDataOffset += uint64(len(data))
 }
 
 func (lf *logFile) firstIndex() uint64 {
 	return lf.getEntry(0).Index()
-}
-
-func (lf *logFile) nextIndex() uint64 {
-	idx := sort.Search(maxEntries, func(i int) bool {
-		e := lf.getEntry(uint64(i))
-		return e.Index() == 0
-	})
-	return uint64(idx)
 }
 
 func (lf *logFile) getEntry(idx uint64) entry {
