@@ -189,7 +189,6 @@ func OpenLogStore(dir string) (*lstore, error) {
 // +-----------------+----------------------+---------------------+
 // | Index (8 bytes) | DataOffset (8 bytes) | DataSize  (8 bytes) |
 // +-----------------+----------------------+---------------------+
-
 type entry []byte
 
 func (e entry) Index() uint64      { return binary.BigEndian.Uint64(e[:8]) }
@@ -210,7 +209,6 @@ func setEntry(buf []byte, idx, dataOffset, dataSize uint64) {
 //
 // If containes the entries for each record, which serves as a metadata. Followed by the
 // corresponding data bytes. Both entries and the data are byte-serialized in a memory-mapped file.
-
 type logFile struct {
 	data []byte
 	fd   *os.File
