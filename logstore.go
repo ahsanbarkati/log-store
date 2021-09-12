@@ -28,12 +28,13 @@ const (
 type lstore struct {
 	sync.RWMutex
 	storeFiles []*logFile
-	cur        *logFile
-
-	nextIdx uint64
-	dir     string
+	cur        *logFile // Current log file that is being used.
+	nextIdx    uint64   // Index at which next write is done.
+	dir        string   // Directory of the log store.
 }
 
+// Append is used to append data blob to the log store. It returns the index at which the blob was
+// written and error, if any. This function is thread-safe.
 func (ls *lstore) Append(b []byte) (uint64, error) {
 	ls.Lock()
 	defer ls.Unlock()
@@ -41,7 +42,7 @@ func (ls *lstore) Append(b []byte) (uint64, error) {
 	// create a new log file if the current log file is full.
 	if ls.cur.nextIdx >= maxEntries {
 		if err := ls.rotate(); err != nil {
-			return 0, errors.Wrap(err, "failed to append")
+			return 0, errors.Wrap(err, "failed to rotate the log file")
 		}
 	}
 	lf := ls.cur
@@ -50,62 +51,77 @@ func (ls *lstore) Append(b []byte) (uint64, error) {
 	return ls.nextIdx - 1, nil
 }
 
+// GetPosition returns the index at which next entry will be writen. It is thread-safe.
 func (ls *lstore) GetPosition() uint64 {
 	return atomic.LoadUint64(&ls.nextIdx)
 }
 
+// Truncate clears the disk space by deleting entries before the given index. It is safe to call
+// this API concurrently.
 func (ls *lstore) Truncate(idx uint64) error {
 	ls.Lock()
 	defer ls.Unlock()
 
+	// Find the log file which has first entry > idx. It is safe to delete all the files before it.
 	fid := sort.Search(len(ls.storeFiles), func(i int) bool {
 		lf := ls.storeFiles[i]
 		return lf.getEntry(0).Index() > idx
 	})
-	count := 0
+
+	var count uint64
 	for _, lf := range ls.storeFiles {
 		if lf.fid < fid {
-			count++
 			if err := lf.delete(); err != nil {
 				return err
 			}
-		} else {
-			break
+			count++
+			continue
 		}
+		break
 	}
 	ls.storeFiles = ls.storeFiles[count:]
 	return nil
 }
 
-func (ls *lstore) Replay(idx uint64, callback func(b []byte)) error {
+// Replay reads the log-store from idx to until the end and calls the callback function for each
+// data entry.
+func (ls *lstore) Replay(idx uint64, callback func(b []byte)) {
 	ls.RLock()
 	defer ls.RUnlock()
 
 	for _, lf := range ls.storeFiles {
 		lf.replay(idx, callback)
 	}
-	return nil
 }
 
+// Sync is used to force sycn the memory-mapped log-store to the disk.
 func (ls *lstore) Sync() error {
-	assert(ls.cur != nil)
+	ls.RLock()
+	defer ls.RUnlock()
+
 	return unix.Msync(ls.cur.data, unix.MS_SYNC)
 }
 
+// Close safely closes the log store by syncing it to the disk.
 func (ls *lstore) Close() error {
-	if err := ls.Sync(); err != nil {
-		return err
+	if err := unix.Msync(ls.cur.data, unix.MS_SYNC); err != nil {
+		return errors.Wrap(err, "failed to sync to disk")
 	}
 	if err := unix.Munmap(ls.cur.data); err != nil {
-		return err
+		return errors.Wrap(err, "failed to Munmap")
 	}
-	return ls.cur.fd.Close()
+	err := ls.cur.fd.Close()
+	return errors.Wrap(err, "failed to close the file")
 }
 
+// rotate closes the current log file, creates a new log file and sets it as the current file.
 func (ls *lstore) rotate() error {
+	if err := unix.Msync(ls.cur.data, unix.MS_SYNC); err != nil {
+		return errors.Wrap(err, "failed to sync to disk")
+	}
 	lf, err := OpenLogFile(ls.dir, len(ls.storeFiles))
 	if err != nil {
-		return errors.Wrap(err, "failed to rotate log file")
+		return errors.Wrap(err, "failed to open new log file")
 	}
 	lf.init()
 	ls.storeFiles = append(ls.storeFiles, lf)
@@ -113,6 +129,8 @@ func (ls *lstore) rotate() error {
 	return nil
 }
 
+// OpenLogStore opens the log-store at the given directory. If there is already some store files
+// present, then it initializes its state with those files, otherwise it creates a new store file.
 func OpenLogStore(dir string) (*lstore, error) {
 	var fileList []string
 	err := filepath.Walk(dir, func(path string, fi os.FileInfo, err error) error {
@@ -125,7 +143,7 @@ func OpenLogStore(dir string) (*lstore, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to open log store")
+		return nil, errors.Wrap(err, "failed walk the given directory")
 	}
 
 	var files []*logFile
@@ -152,12 +170,12 @@ func OpenLogStore(dir string) (*lstore, error) {
 		storeFiles: files,
 		dir:        dir,
 	}
-
 	if cnt := len(files); cnt > 0 {
 		ls.cur = files[cnt-1]
 		return ls, nil
 	}
 
+	// No store files were found, create one.
 	lf, err := OpenLogFile(dir, 0)
 	lf.init()
 	ls.cur = lf
