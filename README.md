@@ -1,5 +1,5 @@
 # Log Store
-[<img src="log-store.png" width="300"/>](log-store.png)
+[<img src="log-store-trans.png" width="300"/>](log-store-trans.png)
 
 Log store is a persistent record storage system. It can be used inscenarios where records only needs to be appended and replayed, for example in a Write-Ahead Log in distributed systems. This implementation is thread safe and enables fast append, truncate and replay operations.
 
