@@ -42,12 +42,46 @@ func TestLogFileAppend(t *testing.T) {
 	require.Equal(t, uint64(dataStartOffset+len(data)), lf.nextDataOffset)
 }
 
+func TestConcurrentAppend(t *testing.T) {
+	ls, err := OpenLogStore(t.TempDir())
+	require.NoError(t, err)
+	require.Equal(t, 1, len(ls.storeFiles))
+
+	var wg sync.WaitGroup
+	numBlobs := 2 * maxEntries
+	numGo := 16
+
+	for i := 0; i < numGo; i++ {
+		wg.Add(1)
+		go func(thread int, wg *sync.WaitGroup) {
+			defer wg.Done()
+			for i := 0; i < numBlobs; i++ {
+				_, err := ls.Append([]byte(fmt.Sprintf("hello-%d-%d", thread, i)))
+				require.NoError(t, err)
+			}
+		}(i, &wg)
+	}
+	wg.Wait()
+
+	mp := make(map[int]int)
+	ls.Replay(0, func(buf []byte) {
+		splits := strings.Split(string(buf), "-")
+		th, err := strconv.Atoi(splits[1])
+		require.NoError(t, err)
+		mp[th]++
+	})
+
+	for i := 0; i < numGo; i++ {
+		require.Equal(t, numBlobs, mp[i])
+	}
+}
+
 func TestAppendAndReplay(t *testing.T) {
 	ls, err := OpenLogStore(t.TempDir())
 	require.NoError(t, err)
 	require.Equal(t, 1, len(ls.storeFiles))
 
-	n := int(100)
+	n := maxEntries * 10
 	for i := 0; i < n; i++ {
 		idx, err := ls.Append(getBlob(i))
 		require.NoError(t, err)
@@ -108,38 +142,4 @@ func TestTruncate(t *testing.T) {
 		}
 		return nil
 	})
-}
-
-func TestConcurrentAppend(t *testing.T) {
-	ls, err := OpenLogStore(t.TempDir())
-	require.NoError(t, err)
-	require.Equal(t, 1, len(ls.storeFiles))
-
-	var wg sync.WaitGroup
-	numBlobs := 100
-	numGo := 16
-
-	for i := 0; i < numGo; i++ {
-		wg.Add(1)
-		go func(thread int, wg *sync.WaitGroup) {
-			defer wg.Done()
-			for i := 0; i < numBlobs; i++ {
-				_, err := ls.Append([]byte(fmt.Sprintf("hello-%d-%d", thread, i)))
-				require.NoError(t, err)
-			}
-		}(i, &wg)
-	}
-	wg.Wait()
-
-	mp := make(map[int]int)
-	ls.Replay(0, func(buf []byte) {
-		splits := strings.Split(string(buf), "-")
-		th, err := strconv.Atoi(splits[1])
-		require.NoError(t, err)
-		mp[th]++
-	})
-
-	for i := 0; i < numGo; i++ {
-		require.Equal(t, numBlobs, mp[i])
-	}
 }

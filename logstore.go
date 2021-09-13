@@ -16,12 +16,10 @@ import (
 )
 
 const (
-	logSuffix  = ".store"
-	entrySize  = 24
-	maxEntries = 1000
-
-	logFileSize = 1 << 30
-
+	logSuffix       = ".store"
+	entrySize       = 24
+	maxEntries      = 1000
+	logFileSize     = 1 << 30
 	dataStartOffset = entrySize * maxEntries
 )
 
@@ -275,15 +273,18 @@ func (lf *logFile) append(data []byte, idx uint64) {
 	lf.nextDataOffset += uint64(len(data))
 }
 
+// firstIndex returns the index of the first entry in the log file.
 func (lf *logFile) firstIndex() uint64 {
 	return lf.getEntry(0).Index()
 }
 
+// getEntry returns the entry at the given index in the log file.
 func (lf *logFile) getEntry(idx uint64) entry {
 	entryOffset := idx * entrySize
 	return entry(lf.data[entryOffset : entryOffset+entrySize])
 }
 
+// getData returns the data present at the given index in the log file.
 func (lf *logFile) getData(idx uint64) []byte {
 	e := lf.getEntry(idx)
 	off := e.DataOffset()
@@ -291,12 +292,14 @@ func (lf *logFile) getData(idx uint64) []byte {
 	return lf.data[off : off+sz]
 }
 
+// replay calles the callback function on each entry starting from the index idx.
 func (lf *logFile) replay(idx uint64, f func(b []byte)) {
 	for i := idx; i < lf.nextIdx; i++ {
 		f(lf.getData(i))
 	}
 }
 
+// delete safely removes the logfile.
 func (lf *logFile) delete() error {
 	if err := unix.Munmap(lf.data); err != nil {
 		return errors.Wrap(err, "delete failed to unmap")
