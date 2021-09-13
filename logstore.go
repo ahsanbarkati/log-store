@@ -17,9 +17,9 @@ import (
 
 const (
 	logSuffix       = ".store"
-	entrySize       = 24
-	maxEntries      = 1000
-	logFileSize     = 1 << 30
+	entrySize       = 24      // Each entry contains three uint64's as a meta.
+	maxEntries      = 100     // Maximum number of entries that can be put in a single log file.
+	logFileSize     = 1 << 30 // Size of the memory mapped log file.
 	dataStartOffset = entrySize * maxEntries
 )
 
